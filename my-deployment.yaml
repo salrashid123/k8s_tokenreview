@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: svc1-sa
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/service-account-token
+metadata:
+  name: mysecretname
+  annotations:
+    kubernetes.io/service-account.name: svc1-sa
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-deployment
+  labels:
+    type: myapp-deployment-label
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      type: myapp
+  template:
+    metadata:
+      labels:
+        type: myapp
+        tier: frontend
+        version: v1
+    spec:
+      serviceAccountName: svc1-sa    
+      containers:
+      - name: frontend
+        image: debian
+        args:
+        - sleep
+        - "1000000"
+        volumeMounts:
+        - mountPath: /var/run/secrets/iot-token
+          name: iot-token         
+      volumes:
+      - name: iot-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: iot-token
+              expirationSeconds: 7200
+              audience: gcp-sts-audience
