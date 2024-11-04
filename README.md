@@ -4,9 +4,9 @@ Simple demo of using [Kubernetes TokenReview API](https://kubernetes.io/docs/ref
 
 This repo is nothing new other than a way to demonstrate how you can validate an k8s sa token using both a standard `JWT Validator` and the `TokenReview` API
 
-The JWT validator simply verifies if a token is signed correctly and has some claims.  The signature validation is done by retrieving the JWKs certs directly from the target kubernetes API server endpoit.
+The JWT validator simply verifies if a token is signed correctly and has some claims.  The signature validation is done by retrieving the JWKs certs directly from the target kubernetes API server endpoint or via local JWK file.
 
-The TokenReview is done by invoking the api endpoint directly
+The TokenReview is done by invoking the kubernetes api endpoint api remotely.  If you are running 'incluster' you ofcourse dont' have to do all this with ngrok.
 
 --this repo is nothing new; just wrote it here for my ref--
 
@@ -29,44 +29,47 @@ Other references
 First install the following on your laptop
 
 * [minikube](https://minikube.sigs.k8s.io/docs/)
-* [ngrok](https://ngrok.com/)
 * optionally [jq](https://stedolan.github.io/jq/)
 
 
-### Configure ngrok Tunnel
-
-First Step is to run `ngrok` and find out the URL its assigned to you.
-
-The only reason why w'ere usign ngrok is to give a public ip address; you don't have to, but its just easier this way for the demo
-
 ```bash
-./ngrok http -host-header=rewrite  localhost:8080
-
-## you'll get a publicAddress, just note it down
-export DISCOVERY_URL="https://e955-2600-4040-2098-a700-c12-d391-3ae8-35dd.ngrok.io"
-```
-
-Now start minikube and enable the jwk url that points to the server
-
-```bash
-minikube stop
-minikube delete
-
+export DISCOVERY_URL="https://some-address"
+## i used kvm2, you can use anything
 minikube start --driver=kvm2 --embed-certs \
     --extra-config=apiserver.service-account-jwks-uri=$DISCOVERY_URL/openid/v1/jwks \
     --extra-config=apiserver.service-account-issuer=$DISCOVERY_URL   
 
-# new window, create a proxy back
-kubectl proxy --port=8080  --accept-paths="^/\.well-known\/openid-configuration|^/openid\/v1\/jwks|^\/apis\/authentication.k8s.io\/v1\/tokenreviews" 
-
-kubectl create clusterrolebinding oidc-reviewer --clusterrole=system:service-account-issuer-discovery --group=system:unauthenticated
-
+# (optional steps) if you want to expose the endpoint directly via proxy, create a proxy back
+## kubectl proxy --port=8080  --accept-paths="^/\.well-known\/openid-configuration|^/openid\/v1\/jwks|^\/apis\/authentication.k8s.io\/v1\/tokenreviews" 
+## to allow anon access to tokenreview api remotely w/o creds.
+## kubectl create clusterrolebinding oidc-reviewer --clusterrole=system:service-account-issuer-discovery --group=system:unauthenticated
 # test that you can see the jwks endpoint/oidc config
-curl -s $DISCOVERY_URL/.well-known/openid-configuration | jq '.'
 
+## export the oidc config and jwk
 kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
+kubectl get --raw /openid/v1/jwks | jq '.'  > jwk.json
+```
 
-## apply a sample deployment which mounts a svc account token to /var/run/secrets/iot-token
+for me the jwk was
+
+```json
+{
+  "keys": [
+    {
+      "use": "sig",
+      "kty": "RSA",
+      "kid": "yHwD6nFW5gCsPg6dtdqrhm18iAtj_0rkX5CJNGvfPF4",
+      "alg": "RS256",
+      "n": "5OGPUXHd3Fq9Xi9UnKQjV-vpIWcmrQPBLxbmn_ol3qu8SuF-RASKgTMZajktlp4HH8GmhDXNFUR8i2oz1vRMhwVgvikHZ-R0ZbrY-lMQzQ5cOpgyvWKys6nccAY84Tn51Nd1QQnR78WxZZ0RYOwtCx0_NuAF8sgjJa55cN_s-sN27n1aXUzt4j5asxtU9co7tQ5SacvAJnBkXmvAQx8A74tSeg-sHaxA4Gms-5Men79S_RUP1gPc75ti78_PKCAtSNhuPUa-8YkfKGp-jdv15g8yWgwX650lMJuwZezwSVYbwpNtZkpolbHGhpvBHUldt_IyFjMF64ZzC2uz9oPHRQ",
+      "e": "AQAB"
+    }
+  ]
+}
+```
+
+apply a sample deployment which mounts a svc account token to `/var/run/secrets/iot-token`
+
+```bash
 kubectl apply -f my-deployment.yaml
 ```
 
@@ -74,14 +77,16 @@ In my case, i saw
 
 ```bash
 $ kubectl get po
-NAME                               READY   STATUS    RESTARTS   AGE
-myapp-deployment-c667994cd-4klvs   1/1     Running   0          24m
-myapp-deployment-c667994cd-5mhsn   1/1     Running   0          24m
+NAME                                READY   STATUS    RESTARTS   AGE
+myapp-deployment-6445ccd844-7vs45   1/1     Running   0          10s
+myapp-deployment-6445ccd844-lb627   1/1     Running   0          10s
 
-$ export SA_TOKEN=`kubectl exec myapp-deployment-c667994cd-4klvs -- cat /var/run/secrets/iot-token/iot-token`
+
+export SA_TOKEN=`kubectl exec -n default   $(kubectl get pod -n default -l type=myapp -o jsonpath='{.items[0].metadata.name}')   --   cat /var/run/secrets/iot-token/iot-token`
+
 
 $ echo $SA_TOKEN
-eyJhbGciOiJSUzI1NiIsImtpZCI6Ik9lRW9Sanh1RzVzMllvT2liSVZIemZzZi10Zm5lM3Rwdm5UcmNDbDNHeTgifQ.eyJhdWQiOlsiZ2NwLXN0cy1hdWRpZW5jZSJdLCJleHAiOjE2ODg3NTQ5MzgsImlhdCI6MTY4ODc0NzczOCwiaXNzIjoiaHR0cHM6Ly9lOTU1LTI2MDAtNDA0MC0yMDk4LWE3MDAtYzEyLWQzOTEtM2FlOC0zNWRkLm5ncm9rLmlvIiwia3ViZXJuZXRlcy5pbyI6eyJuYW1lc3BhY2UiOiJkZWZhdWx0IiwicG9kIjp7Im5hbWUiOiJteWFwcC1kZXBsb3ltZW50LWM2Njc5OTRjZC00a2x2cyIsInVpZCI6IjBjNGU1ZDc3LTJmY2ItNDY5My04NmMzLWZlMzlmZWUzOWM0YSJ9LCJzZXJ2aWNlYWNjb3VudCI6eyJuYW1lIjoic3ZjMS1zYSIsInVpZCI6IjhiMDhkOTM4LTg3MzAtNGU1Ni05ZDkzLThiZTMyZjgyMDI4NyJ9fSwibmJmIjoxNjg4NzQ3NzM4LCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6ZGVmYXVsdDpzdmMxLXNhIn0.AG2Cn1sMYEdh_ezbjsU8HFYo-OzLjbXe0HwtomIlE0s7dfJf8gxcy31UFL-jpdqkyoGBs1YnqcbZWCD36_Sq_6HWNYqXgd_SaeAwA7QT1jS0_rbN99jYMfFtddNCSsFSpSdM6RQ02qgTrSMGgQ0zOTtPZf3KNY-L7kS7y0OTKnzw6632EysU0q7gI-qBUbTH2U6n7r9eWRhpDdgJdH3P7Efx0OlmmQigCwgwExWMfPsvOzdQo13i2--N1nTI_evrhF-41YLr_v_xEBLx67AH6weZVpM1eQtE3gSRNqDlcbR65_N69CaTW8zUF5LHmy39XbqSUnap4Kles8jHWvju6A
+eyJhbGciOiJSUzI1NiIsImtpZCI6InlId0Q2bkZXNWdDc1BnNmR0ZHFyaG0xOGlBdGpfMHJrWDVDSk5HdmZQRjQifQ.eyJhdWQiOlsiZ2NwLXN0cy1hdWRpZW5jZSJdLCJleHAiOjE3MzA3Mjc5MzMsImlhdCI6MTczMDcyMDczMywiaXNzIjoiaHR0cHM6Ly9zb21lLWFkZHJlc3MiLCJqdGkiOiI3ZGIxZDFmZi01MmZhLTQ4MzItYjVlOS0wMDY3NDI2YjE3YmUiLCJrdWJlcm5ldGVzLmlvIjp7Im5hbWVzcGFjZSI6ImRlZmF1bHQiLCJub2RlIjp7Im5hbWUiOiJtaW5pa3ViZSIsInVpZCI6IjJkMGI1ODg1LWVkNDUtNGFiMy1iNDViLWRkNzgyMGI3ZTk3NCJ9LCJwb2QiOnsibmFtZSI6Im15YXBwLWRlcGxveW1lbnQtNjQ0NWNjZDg0NC03dnM0NSIsInVpZCI6IjM1Mjc1Zjc0LWZhNTgtNDM5Ni04ZDE1LThlMjI0ZGZkZjJlYSJ9LCJzZXJ2aWNlYWNjb3VudCI6eyJuYW1lIjoic3ZjMS1zYSIsInVpZCI6IjA5NzNlN2IwLWRkZDktNDc0Mi1hZWUxLWJmY2UzZDVkMWE0YSJ9fSwibmJmIjoxNzMwNzIwNzMzLCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6ZGVmYXVsdDpzdmMxLXNhIn0.Vr1k1xVvGL2jNUIl0KGRiuUBBfwXwUT_pHkirQ75xLUoViqZY7OKbMTxJSHJiJw6TMcFg0jShT13PPq-zbvM8bw6urndodLv3GGXzk254O8GZ1Uyh0QE9Nv-xiVoxt5LGOYqGHwg2Uj-og9vzZ27fsVQWU0xlvGHkGBXgHvrBSvjc8uQHRQxRmO6o3CRxq5SgF8z35EryH6irpu5b05CIuJnPrMxork25QhsrbDtjPaHQ9pSMRm4DoP4CVKki1GCqyHqj8kJKpy4gkZq45IiyLL3Dlnu8DMawiFJayDgJFvi2b_TnUTHWcSi6yGeYgFUfu9x-5j12HcMPeU7rsAiUQ
 ```
 
 Note the JWT there is in the form
@@ -89,27 +94,32 @@ Note the JWT there is in the form
 ```json
 {
   "alg": "RS256",
-  "kid": "OeEoRjxuG5s2YoOibIVHzfsf-tfne3tpvnTrcCl3Gy8"
+  "kid": "yHwD6nFW5gCsPg6dtdqrhm18iAtj_0rkX5CJNGvfPF4"
 }.
 {
   "aud": [
     "gcp-sts-audience"
   ],
-  "exp": 1688754938,
-  "iat": 1688747738,
-  "iss": "https://e955-2600-4040-2098-a700-c12-d391-3ae8-35dd.ngrok.io",
+  "exp": 1730727933,
+  "iat": 1730720733,
+  "iss": "https://some-address",
+  "jti": "7db1d1ff-52fa-4832-b5e9-0067426b17be",
   "kubernetes.io": {
     "namespace": "default",
+    "node": {
+      "name": "minikube",
+      "uid": "2d0b5885-ed45-4ab3-b45b-dd7820b7e974"
+    },
     "pod": {
-      "name": "myapp-deployment-c667994cd-4klvs",
-      "uid": "0c4e5d77-2fcb-4693-86c3-fe39fee39c4a"
+      "name": "myapp-deployment-6445ccd844-7vs45",
+      "uid": "35275f74-fa58-4396-8d15-8e224dfdf2ea"
     },
     "serviceaccount": {
       "name": "svc1-sa",
-      "uid": "8b08d938-8730-4e56-9d93-8be32f820287"
+      "uid": "0973e7b0-ddd9-4742-aee1-bfce3d5d1a4a"
     }
   },
-  "nbf": 1688747738,
+  "nbf": 1730720733,
   "sub": "system:serviceaccount:default:svc1-sa"
 }
 ```
@@ -118,13 +128,12 @@ Note the JWT there is in the form
 to validate it two ways:
 
 ```bash
-$ go run main.go --host=$DISCOVERY_URL --token=$SA_TOKEN
-
+$ go run main.go --jwk=../jwk.json --token=$SA_TOKEN
 Using JWT Validation
-JWKS URL https://0c71-2600-4040-2098-a700-c12-d391-3ae8-35dd.ngrok.io/openid/v1/jwks
-OIDC signature verified  with Audience [[gcp-sts-audience]] Issuer [https://e955-2600-4040-2098-a700-c12-d391-3ae8-35dd.ngrok.io] and PodName [0c4e5d77-2fcb-4693-86c3-fe39fee39c4a]
+OIDC signature verified  with Audience [[gcp-sts-audience]] Issuer [https://some-address] and PodName [35275f74-fa58-4396-8d15-8e224dfdf2ea]
+
 Using TokenReview API
-TokenReview Verified with user UID [8b08d938-8730-4e56-9d93-8be32f820287];  Authenticated: true
+TokenReview Verified with user UID [0973e7b0-ddd9-4742-aee1-bfce3d5d1a4a];  Authenticated: true
 ```
 
 
